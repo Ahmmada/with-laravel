@@ -1,3 +1,4 @@
+// app/(tabs)/_layout.tsx
 import { Tabs } from 'expo-router';
 import React from 'react';
 import { Platform } from 'react-native';
@@ -7,6 +8,9 @@ import { IconSymbol } from '@/components/ui/IconSymbol';
 import TabBarBackground from '@/components/ui/TabBarBackground';
 import { Colors } from '@/constants/Colors';
 import { useColorScheme } from '@/hooks/useColorScheme';
+import { AntDesign } from '@expo/vector-icons';
+import { MaterialCommunityIcons, FontAwesome6 } from '@expo/vector-icons';
+
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
@@ -40,6 +44,51 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
         }}
       />
+<Tabs.Screen
+  name="students"
+  options={{
+  headerShown: true,
+    title: 'الطلاب',
+    tabBarIcon: ({ color }) => (
+      <MaterialCommunityIcons name="account-details" size={20} color={color} />
+    ),
+
+  }}
+/>
+<Tabs.Screen
+  name="centers"
+  options={{
+  headerShown: true,
+    title: 'المراكز',
+    tabBarIcon: ({ color }) => (
+      <MaterialCommunityIcons name="school-outline" size={20} color={color} />
+    ),
+
+  }}
+/>
+<Tabs.Screen
+  name="levels"
+  options={{
+  headerShown: true,
+    title: 'المستويات',
+    tabBarIcon: ({ color }) => (
+     <FontAwesome6 name="ranking-star" size={20} color={color}  />
+    ),
+
+  }}
+/>
+
+<Tabs.Screen
+  name="groups"
+  options={{
+  headerShown: true,
+    title: 'المجموعات',
+    tabBarIcon: ({ color }) => (
+     <FontAwesome6 name="ranking-star" size={20} color={color}  />
+    ),
+
+  }}
+/>
     </Tabs>
   );
 }
