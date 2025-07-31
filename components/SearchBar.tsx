@@ -15,7 +15,7 @@ export default function SearchBar({ searchQuery, setSearchQuery }: SearchBarProp
       <TextInput
         value={searchQuery}
         onChangeText={setSearchQuery}
-        placeholder="ابحث عن مجموعة..."
+        placeholder="ابحث بالاسم..."
         style={styles.searchInput}
         placeholderTextColor="#9ca3af"
         autoCorrect={false} // لمنع اقتراحات التصحيح التلقائي التي قد تسبب مشاكل

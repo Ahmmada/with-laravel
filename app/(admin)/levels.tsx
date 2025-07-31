@@ -1,4 +1,4 @@
-// LevelsScreen.tsx
+// app/(tabs)/levels.tsx
 import { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -16,18 +16,20 @@ import { supabase } from '@/lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
 import SearchBar from '@/components/SearchBar';
 import {
-  initDb,
   getLocalLevels,
   insertLocalLevel,
   updateLocalLevel,
   deleteLocalLevel,
-  getUnsyncedChanges,
-  clearSyncedChange,
   updateLocalLevelSupabaseId,
   Level,
-} from '@/lib/localDb';
+  markLevelAsSynced,
+  markRemoteDeletedLocally,
+  updateLocalLevelFieldsBySupabase,
+  insertFromSupabaseIfNotExists,
+  deleteLocalLevelByUuidAndMarkSynced,
+} from '@/lib/levelsDb';
+import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
 import NetInfo from '@react-native-community/netinfo';
-import * as SQLite from 'expo-sqlite';
 
 export default function LevelsScreen() {
   const [levels, setLevels] = useState<Level[]>([]);
@@ -39,29 +41,22 @@ export default function LevelsScreen() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
 
-useEffect(() => {
-  const initializeApp = async () => {
-    try {
-      await initDb(); // تأكد من أنها تكتمل
-      console.log('✅ Database initialized');
-
-      const unsubscribe = NetInfo.addEventListener(state => {
-        setIsConnected(state.isConnected);
-        if (state.isConnected) {
-          syncDataWithSupabase();
-        }
-      });
-
-      await fetchLevels(); // جلب البيانات بعد التهيئة
-      return () => unsubscribe();
-    } catch (error) {
-      console.error('❌ Failed to initialize DB:', error);
-      Alert.alert('خطأ', 'فشل في تهيئة قاعدة البيانات المحلية');
-    }
-  };
-
-  initializeApp();
-}, []);
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    const initializeLevelsScreen = async () => {
+      try {
+        unsubscribe = NetInfo.addEventListener(state => setIsConnected(state.isConnected));
+        await fetchLevels();
+      } catch (error) {
+        console.error('❌ Failed to prepare LevelsScreen:', error);
+        Alert.alert('خطأ', 'فشل في تهيئة شاشة المستويات');
+      }
+    };
+    initializeLevelsScreen();
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
 
   const fetchLevels = useCallback(async () => {
     setLoading(true);
@@ -78,106 +73,165 @@ useEffect(() => {
 
   const syncDataWithSupabase = useCallback(async () => {
     if (!isConnected) {
-      console.log('Not connected to internet, skipping sync.');
+      console.log('Not connected to internet, skipping Supabase sync.');
       return;
     }
-    console.log('Attempting to sync data with Supabase...');
 
     try {
       const unsyncedChanges = await getUnsyncedChanges();
+      if (unsyncedChanges.length > 0) {
+        console.log(`Attempting to sync ${unsyncedChanges.length} changes...`);
+      }
 
-      for (const change of unsyncedChanges) {
+      await Promise.all(unsyncedChanges.map(async (change) => {
         try {
           if (change.entity === 'levels') {
             const payload = JSON.parse(change.payload);
+            let syncSuccessful = false;
 
             if (change.operation === 'INSERT') {
               const { data, error } = await supabase
                 .from('levels')
-                .insert([{ 
+                .insert([{
+                  uuid: payload.uuid,
                   name: payload.name,
-                  created_at: payload.created_at || new Date().toISOString()
+                  created_at: payload.created_at,
+                  updated_at: payload.updated_at,
+                  is_synced: true
                 }])
                 .select();
-              if (error) throw error;
-              if (data && data.length > 0) {
-                await updateLocalLevelSupabaseId(change.entity_local_id, data[0].id);
-                await clearSyncedChange(change.id);
+              if (error) {
+                if (error.code === '23505' && error.message.includes('levels_name_key')) {
+                  return new Promise<void>((resolve) => {
+                    Alert.alert(
+                      'تنبيه',
+                      `اسم المستوى "${payload.name}" موجود بالفعل. هل تريد حذف الإدخال المحلي؟`,
+                      [
+                        { text: 'إلغاء', style: 'cancel', onPress: () => resolve() },
+                        {
+                          text: 'حذف',
+                          style: 'destructive',
+                          onPress: async () => {
+                            await deleteLocalLevelByUuidAndMarkSynced(payload.uuid);
+                            await clearSyncedChange(change.id);
+                            resolve();
+                          },
+                        },
+                      ]
+                    );
+                  });
+                }
+                throw error;
               }
-            } else if (change.operation === 'UPDATE') {
+              if (data && data.length > 0) {
+                await updateLocalLevelSupabaseId(change.entity_local_id, change.entity_uuid, data[0].id);
+                await markLevelAsSynced(change.entity_local_id);
+                syncSuccessful = true;
+              }
+            } 
+              else if (change.operation === 'UPDATE') {
+  const { error } = await supabase
+    .from('levels')
+    .update({
+      name: payload.name,
+      updated_at: payload.updated_at,
+      is_synced: true
+    })
+    .eq('uuid', payload.uuid)
+    .is('deleted_at', null);
+
+  if (error) {
+    // معالجة الخطأ...
+  } else {
+    await markLevelAsSynced(change.entity_local_id); // ✅ إضافة هذا السطر
+    syncSuccessful = true;
+  }
+}
+            else if (change.operation === 'DELETE') {
               const { error } = await supabase
                 .from('levels')
-                .update({ 
-                  name: payload.name,
-                  updated_at: payload.updated_at || new Date().toISOString()
+                .update({
+                  deleted_at: payload.deleted_at,
+                  updated_at: payload.updated_at,
+                  is_synced: true
                 })
-                .eq('id', change.entity_supabase_id);
+                .eq('uuid', payload.uuid)
+                .is('deleted_at', null);
               if (error) throw error;
+              syncSuccessful = true;
+            }
+
+            if (syncSuccessful) {
               await clearSyncedChange(change.id);
-            } else if (change.operation === 'DELETE') {
-              const { error } = await supabase
-                .from('levels')
-                .update({ 
-                  deleted_at: payload.deleted_at || new Date().toISOString()
-                })
-                .eq('id', change.entity_supabase_id);
-              if (error) throw error;
-              await clearSyncedChange(change.id);
+              console.log(`✅ Synced ${change.operation} for level UUID: ${change.entity_uuid}`);
             }
           }
         } catch (error: any) {
-          console.error(`Error syncing change ${change.id}:`, error.message);
+          console.error(`❌ Error syncing change ${change.id}:`, error.message);
           Alert.alert('خطأ في المزامنة', `حدث خطأ أثناء مزامنة: ${error.message}`);
         }
-      }
+      }));
 
-      console.log('Sync complete. Re-fetching local data.');
       await fetchLevels();
       await fetchRemoteLevelsAndMerge();
     } catch (error: any) {
-      console.error('Unexpected error during sync:', error.message);
+      console.error('❌ Unexpected error during syncDataWithSupabase:', error.message);
     }
-  }, [isConnected, fetchLevels]);
+  }, [isConnected, fetchLevels, fetchRemoteLevelsAndMerge]);
 
-  const fetchRemoteLevelsAndMerge = async () => {
+  const fetchRemoteLevelsAndMerge = useCallback(async () => {
     if (!isConnected) return;
 
-    console.log('Fetching remote levels and merging...');
     try {
-      const { data, error } = await supabase
+      const { data: remoteLevels, error } = await supabase
         .from('levels')
         .select('*')
         .order('id', { ascending: true });
       if (error) throw error;
 
-      if (data) {
-        const remoteLevels = data;
-        const localLevels = await getLocalLevels();
-        const db = await SQLite.openDatabaseAsync('appl.db');
+      const localLevels = await getLocalLevels();
 
-        for (const remoteLevel of remoteLevels) {
-          const exists = localLevels.some(l => l.supabase_id === remoteLevel.id);
-          if (!exists) {
-            await db.runAsync(
-              'INSERT OR IGNORE INTO levels (name, supabase_id, is_synced, operation_type, created_at) VALUES (?, ?, 1, NULL, ?);',
-              [remoteLevel.name, remoteLevel.id, remoteLevel.created_at || new Date().toISOString()]
-            );
+      await Promise.all(remoteLevels.map(async (remoteLevel) => {
+        if (remoteLevel.deleted_at) {
+          const existingLocal = localLevels.find(l => l.uuid === remoteLevel.uuid);
+          if (existingLocal && !existingLocal.deleted_at) {
+            await markRemoteDeletedLocally(remoteLevel.id, remoteLevel.deleted_at);
+            console.log(`🗑️ Marked remote deleted level locally: ${remoteLevel.name}`);
           }
+          return;
         }
 
-        await fetchLevels();
-      }
+        const localLevel = localLevels.find(l => l.uuid === remoteLevel.uuid);
+
+        if (!localLevel) {
+          await insertFromSupabaseIfNotExists(remoteLevel);
+          console.log(`➕ Inserted new level from Supabase: ${remoteLevel.name}`);
+        } else {
+          const remoteUpdate = new Date(remoteLevel.updated_at || remoteLevel.created_at || 0).getTime();
+          const localUpdate = new Date(localLevel.updated_at || localLevel.created_at || 0).getTime();
+
+          if (remoteUpdate > localUpdate) {
+            await updateLocalLevelFieldsBySupabase(remoteLevel);
+            console.log(`🔄 Updated local level from Supabase: ${localLevel.name}`);
+          }
+        }
+      }));
+
+      await fetchLevels();
     } catch (error: any) {
-      console.error('Error fetching remote levels for merge:', error.message);
+      console.error('❌ Error fetching remote levels:', error.message);
       Alert.alert('خطأ في جلب بيانات Supabase', error.message);
     }
-  };
+  }, [isConnected, fetchLevels]);
 
   useEffect(() => {
-    fetchLevels();
-    if (isConnected) {
-      syncDataWithSupabase();
-    }
+    const init = async () => {
+      await fetchLevels();
+      if (isConnected) {
+        await syncDataWithSupabase();
+      }
+    };
+    init();
   }, [fetchLevels, isConnected, syncDataWithSupabase]);
 
   useEffect(() => {
@@ -202,7 +256,8 @@ useEffect(() => {
       if (editingId) {
         await updateLocalLevel(editingId, name);
       } else {
-        await insertLocalLevel({ name });
+        const { localId, uuid } = await insertLocalLevel({ name });
+        console.log(`New local level created: ID=${localId}, UUID=${uuid}`);
       }
 
       setName('');
@@ -215,6 +270,7 @@ useEffect(() => {
       }
     } catch (error: any) {
       Alert.alert('خطأ', error.message);
+      // لا يتم إغلاق المودال أو إعادة تعيين القيم
     }
   };
 
@@ -232,7 +288,6 @@ useEffect(() => {
               await deleteLocalLevel(id);
               await fetchLevels();
               setSearchQuery('');
-
               if (isConnected) {
                 await syncDataWithSupabase();
               }
@@ -297,7 +352,7 @@ useEffect(() => {
         {searchQuery ? 'لا توجد نتائج للبحث' : 'لا توجد مستويات حتى الآن'}
       </Text>
       <Text style={styles.emptyStateSubtext}>
-        {searchQuery ? `عن "${searchQuery}"` : 'ابدأ بإنشاء مستوى جديدة'}
+        {searchQuery ? `عن "${searchQuery}"` : 'ابدأ بإنشاء مستوى جديد'}
       </Text>
     </View>
   );
@@ -316,9 +371,13 @@ useEffect(() => {
 
       <View style={styles.header}>
         <Text style={styles.title}>المستويات</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => setModalVisible(true)}>
+        <TouchableOpacity style={styles.addButton} onPress={() => {
+          setModalVisible(true);
+          setName('');
+          setEditingId(null);
+        }}>
           <Ionicons name="add-circle" size={24} color="white" />
-          <Text style={styles.addButtonText}>مستوى جديدة</Text>
+          <Text style={styles.addButtonText}>مستوى جديد</Text>
         </TouchableOpacity>
       </View>
 
@@ -348,7 +407,7 @@ useEffect(() => {
 
       <FlatList
         data={filteredLevels}
-        keyExtractor={item => item.id.toString()}
+        keyExtractor={item => item.uuid || item.id.toString()}
         refreshing={loading}
         onRefresh={async () => {
           await fetchLevels();
@@ -376,7 +435,7 @@ useEffect(() => {
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>
-                {editingId ? 'تعديل المستوى' : 'إنشاء مستوى جديدة'}
+                {editingId ? 'تعديل المستوى' : 'إنشاء مستوى جديد'}
               </Text>
               <TouchableOpacity
                 style={styles.closeButton}
