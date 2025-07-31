@@ -1,0 +1,8 @@
+.vscode/*
+app/*
+ios/*
+assets/*
+scripts/
+.gitignore
+README.md
+_layout.tsx
