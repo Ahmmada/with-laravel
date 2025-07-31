@@ -5,4 +5,4 @@ assets/*
 scripts/
 .gitignore
 README.md
-_layout.tsx
+lib/قاعدة البيانات احتياطي supabase.sql
