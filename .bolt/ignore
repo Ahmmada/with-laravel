@@ -6,3 +6,4 @@ scripts/
 .gitignore
 README.md
 lib/قاعدة البيانات احتياطي supabase.sql
+package-lock.json
